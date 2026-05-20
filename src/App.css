@@ -39,6 +39,10 @@
   gap: 12px;
 }
 
+.bank-stats {
+  margin-bottom: 12px;
+}
+
 .stat {
   background: #fff;
   border: 1px solid #e5e7eb;
@@ -158,6 +162,17 @@ button.ghost:hover {
   color: #6b7280;
 }
 
+.table-scroll {
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  overflow: auto;
+  max-height: 320px;
+}
+
+.table-scroll .table {
+  margin: 0;
+}
+
 .cell-action {
   text-align: right;
 }
@@ -199,6 +214,7 @@ button.ghost:hover {
   color: #374151;
   cursor: pointer;
   font-weight: 600;
+  align-self: flex-start;
 }
 
 .file-input input {

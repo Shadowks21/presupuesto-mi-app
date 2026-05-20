@@ -23,6 +23,36 @@ npm run preview
 - **Exportar JSON** descarga un archivo con categorias y gastos.
 - **Importar JSON** restaura los datos en otro navegador o equipo.
 
+## Importacion Banco de Chile (manual)
+
+Esta version mantiene costo 0: no hay conexion directa al banco. Se importan
+archivos Excel desde la banca en linea.
+
+### Cuenta corriente (Excel)
+
+Columnas esperadas:
+- Fecha
+- Detalle
+- Cheque o Cargo
+- Deposito o Abono
+- Saldo
+- (Opcional) Docto. Nro., Trn, Caja, Sucursal
+
+### Tarjeta de credito (Excel)
+
+Columnas esperadas:
+- Fecha
+- Tipo de Tarjeta
+- Descripcion
+- Ciudad
+- Cuotas
+- Monto ($)
+
+### Cuotas del mes
+
+El monto a pagar por cuotas del mes actual se ingresa manualmente en la app,
+porque el banco no lo entrega en los archivos exportados.
+
 ## Despliegue gratis (costo neto 0)
 
 ### Cloudflare Pages

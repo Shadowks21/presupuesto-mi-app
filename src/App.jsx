@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
+import * as XLSX from 'xlsx'
 import './App.css'
 
-const STORAGE_KEY = 'presupuesto-data:v1'
+const STORAGE_KEY = 'presupuesto-data:v2'
 const currency = new Intl.NumberFormat('es-CL', {
   style: 'currency',
   currency: 'CLP',
@@ -9,22 +10,108 @@ const currency = new Intl.NumberFormat('es-CL', {
 })
 
 const getToday = () => new Date().toISOString().slice(0, 10)
+const BANK_DEFAULT = {
+  accountMovements: [],
+  cardMovements: [],
+  monthlyInstallmentsDue: 0,
+  lastAccountImportAt: '',
+  lastCardImportAt: '',
+}
+
+const normalizeHeader = (value) =>
+  value
+    .toString()
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]/g, '')
+
+const parseAmount = (value) => {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return Math.round(value)
+  }
+  if (value === null || value === undefined) return 0
+
+  let text = String(value).trim()
+  if (!text) return 0
+  text = text.replace(/[^\d,.-]/g, '')
+
+  if (text.includes(',') && text.includes('.')) {
+    text = text.replace(/\./g, '').replace(',', '.')
+  } else if (text.includes(',')) {
+    text = text.replace(',', '.')
+  }
+
+  const parsed = Number.parseFloat(text)
+  if (!Number.isFinite(parsed)) return 0
+  return Math.round(parsed)
+}
+
+const parseExcelDate = (value) => {
+  if (value instanceof Date) return value
+  if (typeof value === 'number') {
+    const parsed = XLSX.SSF.parse_date_code(value)
+    if (!parsed) return null
+    return new Date(parsed.y, parsed.m - 1, parsed.d)
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (!trimmed) return null
+    const parts = trimmed.split(/[/-]/)
+    if (parts.length === 3) {
+      const [day, month, year] = parts.map((part) => Number(part))
+      if (year && month && day) {
+        return new Date(year, month - 1, day)
+      }
+    }
+    const parsed = new Date(trimmed)
+    if (!Number.isNaN(parsed.getTime())) return parsed
+  }
+  return null
+}
+
+const formatDate = (value) => {
+  const date = parseExcelDate(value)
+  if (!date) return ''
+  return date.toISOString().slice(0, 10)
+}
+
+const formatDateTime = (value) => {
+  if (!value) return 'Sin importar'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return 'Sin importar'
+  return date.toLocaleString('es-CL')
+}
 
 const loadInitialData = () => {
   if (typeof window === 'undefined') {
-    return { categories: [], expenses: [], error: '', canPersist: true }
+    return { categories: [], expenses: [], bankData: BANK_DEFAULT, error: '', canPersist: true }
   }
 
   const stored = localStorage.getItem(STORAGE_KEY)
   if (!stored) {
-    return { categories: [], expenses: [], error: '', canPersist: true }
+    return { categories: [], expenses: [], bankData: BANK_DEFAULT, error: '', canPersist: true }
   }
 
   try {
     const parsed = JSON.parse(stored)
+    const bankData = parsed.bankData && typeof parsed.bankData === 'object'
+      ? {
+          ...BANK_DEFAULT,
+          ...parsed.bankData,
+          accountMovements: Array.isArray(parsed.bankData.accountMovements)
+            ? parsed.bankData.accountMovements
+            : [],
+          cardMovements: Array.isArray(parsed.bankData.cardMovements)
+            ? parsed.bankData.cardMovements
+            : [],
+        }
+      : BANK_DEFAULT
     return {
       categories: Array.isArray(parsed.categories) ? parsed.categories : [],
       expenses: Array.isArray(parsed.expenses) ? parsed.expenses : [],
+      bankData,
       error: '',
       canPersist: true,
     }
@@ -32,6 +119,7 @@ const loadInitialData = () => {
     return {
       categories: [],
       expenses: [],
+      bankData: BANK_DEFAULT,
       error: 'No se pudo leer el almacenamiento local. Intenta importar un respaldo.',
       canPersist: false,
     }
@@ -42,6 +130,7 @@ function App() {
   const [initialData] = useState(loadInitialData)
   const [categories, setCategories] = useState(initialData.categories)
   const [expenses, setExpenses] = useState(initialData.expenses)
+  const [bankData, setBankData] = useState(initialData.bankData)
   const [categoryForm, setCategoryForm] = useState({ name: '', budget: '' })
   const [expenseForm, setExpenseForm] = useState({
     date: getToday(),
@@ -56,9 +145,9 @@ function App() {
     if (!canPersist) return
     localStorage.setItem(
       STORAGE_KEY,
-      JSON.stringify({ version: 1, categories, expenses })
+      JSON.stringify({ version: 2, categories, expenses, bankData })
     )
-  }, [categories, expenses, canPersist])
+  }, [categories, expenses, bankData, canPersist])
 
   const spentByCategory = useMemo(() => {
     const totals = new Map()
@@ -78,6 +167,170 @@ function App() {
     [expenses]
   )
   const remaining = totalBudget - totalSpent
+  const accountMovements = bankData.accountMovements
+  const cardMovements = bankData.cardMovements
+
+  const accountBalance = useMemo(() => {
+    if (accountMovements.length === 0) return 0
+    const withDate = accountMovements.filter((item) => item.date)
+    const sorted = [...(withDate.length ? withDate : accountMovements)].sort((a, b) =>
+      String(a.date || '').localeCompare(String(b.date || ''))
+    )
+    const latest = sorted[sorted.length - 1]
+    return Number(latest?.balance) || 0
+  }, [accountMovements])
+
+  const cardUnbilledTotal = useMemo(
+    () => cardMovements.reduce((sum, item) => sum + item.amount, 0),
+    [cardMovements]
+  )
+  const totalCardDue = cardUnbilledTotal + (bankData.monthlyInstallmentsDue || 0)
+
+  const updateBankData = (updater) => {
+    setBankData((prev) => (typeof updater === 'function' ? updater(prev) : updater))
+    setCanPersist(true)
+  }
+
+  const parseWorkbook = async (file) => {
+    const data = await file.arrayBuffer()
+    const workbook = XLSX.read(data, { type: 'array', cellDates: true })
+    const sheetName = workbook.SheetNames[0]
+    if (!sheetName) return []
+    const sheet = workbook.Sheets[sheetName]
+    return XLSX.utils.sheet_to_json(sheet, { defval: '' })
+  }
+
+  const getHeaderKeys = (rows) => {
+    if (rows.length === 0) return []
+    const headerRow = rows.reduce((best, row) =>
+      Object.keys(row).length > Object.keys(best).length ? row : best
+    )
+    return Object.keys(headerRow)
+  }
+
+  const handleAccountImport = async (event) => {
+    setError('')
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    let rows
+    try {
+      rows = await parseWorkbook(file)
+    } catch {
+      setError('No se pudo leer el archivo de cuenta corriente.')
+      event.target.value = ''
+      return
+    }
+
+    const headers = getHeaderKeys(rows).map(normalizeHeader)
+    const required = ['fecha', 'detalle', 'saldo']
+    const missing = required.filter((key) => !headers.includes(key))
+    if (missing.length > 0) {
+      setError(
+        `Faltan columnas esperadas en cuenta corriente: ${missing.join(', ')}.`
+      )
+      event.target.value = ''
+      return
+    }
+
+    const mapped = rows
+      .map((row) => {
+        const normalized = {}
+        for (const [key, value] of Object.entries(row)) {
+          const normalizedKey = normalizeHeader(key)
+          if (normalizedKey) normalized[normalizedKey] = value
+        }
+
+        return {
+          id: crypto.randomUUID(),
+          date: formatDate(normalized.fecha),
+          detail: String(normalized.detalle ?? '').trim(),
+          debit: parseAmount(normalized.chequeocargo),
+          credit: parseAmount(normalized.depositooabono),
+          balance: parseAmount(normalized.saldo),
+          docNumber: String(normalized.doctonro ?? '').trim(),
+          trn: String(normalized.trn ?? '').trim(),
+          caja: String(normalized.caja ?? '').trim(),
+          sucursal: String(normalized.sucursal ?? '').trim(),
+        }
+      })
+      .filter(
+        (item) =>
+          item.date ||
+          item.detail ||
+          item.debit ||
+          item.credit ||
+          item.balance
+      )
+
+    updateBankData((prev) => ({
+      ...prev,
+      accountMovements: mapped,
+      lastAccountImportAt: new Date().toISOString(),
+    }))
+    event.target.value = ''
+  }
+
+  const handleCardImport = async (event) => {
+    setError('')
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    let rows
+    try {
+      rows = await parseWorkbook(file)
+    } catch {
+      setError('No se pudo leer el archivo de tarjeta de credito.')
+      event.target.value = ''
+      return
+    }
+
+    const headers = getHeaderKeys(rows).map(normalizeHeader)
+    const required = ['fecha', 'descripcion', 'monto']
+    const missing = required.filter((key) => !headers.includes(key))
+    if (missing.length > 0) {
+      setError(
+        `Faltan columnas esperadas en tarjeta de credito: ${missing.join(', ')}.`
+      )
+      event.target.value = ''
+      return
+    }
+
+    const mapped = rows
+      .map((row) => {
+        const normalized = {}
+        for (const [key, value] of Object.entries(row)) {
+          const normalizedKey = normalizeHeader(key)
+          if (normalizedKey) normalized[normalizedKey] = value
+        }
+
+        return {
+          id: crypto.randomUUID(),
+          date: formatDate(normalized.fecha),
+          cardType: String(normalized.tipodetarjeta ?? '').trim(),
+          description: String(normalized.descripcion ?? '').trim(),
+          city: String(normalized.ciudad ?? '').trim(),
+          installments: String(normalized.cuotas ?? '').trim(),
+          amount: parseAmount(normalized.monto),
+        }
+      })
+      .filter((item) => item.date || item.description || item.amount)
+
+    updateBankData((prev) => ({
+      ...prev,
+      cardMovements: mapped,
+      lastCardImportAt: new Date().toISOString(),
+    }))
+    event.target.value = ''
+  }
+
+  const handleMonthlyInstallmentsChange = (event) => {
+    const amount = parseAmount(event.target.value)
+    updateBankData((prev) => ({
+      ...prev,
+      monthlyInstallmentsDue: amount,
+    }))
+  }
 
   const handleAddCategory = (event) => {
     event.preventDefault()
@@ -155,7 +408,11 @@ function App() {
   }
 
   const handleExport = () => {
-    const payload = JSON.stringify({ version: 1, categories, expenses }, null, 2)
+    const payload = JSON.stringify(
+      { version: 2, categories, expenses, bankData },
+      null,
+      2
+    )
     const blob = new Blob([payload], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
     const anchor = document.createElement('a')
@@ -202,6 +459,20 @@ function App() {
         typeof expense.note === 'string'
     )
 
+    const nextBankData =
+      parsed.bankData && typeof parsed.bankData === 'object'
+        ? {
+            ...BANK_DEFAULT,
+            ...parsed.bankData,
+            accountMovements: Array.isArray(parsed.bankData.accountMovements)
+              ? parsed.bankData.accountMovements
+              : [],
+            cardMovements: Array.isArray(parsed.bankData.cardMovements)
+              ? parsed.bankData.cardMovements
+              : [],
+          }
+        : BANK_DEFAULT
+
     if (!validCategories || !validExpenses) {
       setError('El archivo tiene datos inválidos. Revisa el formato.')
       event.target.value = ''
@@ -210,6 +481,7 @@ function App() {
 
     setCategories(parsed.categories)
     setExpenses(parsed.expenses)
+    setBankData(nextBankData)
     setCanPersist(true)
     event.target.value = ''
   }
@@ -228,6 +500,134 @@ function App() {
       </header>
 
       {error ? <div className="alert">{error}</div> : null}
+
+      <section className="card">
+        <div className="card-header">
+          <h2>Banco de Chile</h2>
+          <p className="muted">
+            Importa los Excel de cuenta corriente y tarjeta para ver saldos y
+            movimientos no facturados.
+          </p>
+        </div>
+        <div className="stats bank-stats">
+          <div className="stat">
+            <span className="stat-label">Saldo cuenta corriente</span>
+            <strong>{currency.format(accountBalance)}</strong>
+          </div>
+          <div className="stat">
+            <span className="stat-label">No facturado tarjeta</span>
+            <strong>{currency.format(cardUnbilledTotal)}</strong>
+          </div>
+          <div className="stat">
+            <span className="stat-label">Cuotas del mes</span>
+            <strong>{currency.format(bankData.monthlyInstallmentsDue || 0)}</strong>
+          </div>
+          <div className="stat">
+            <span className="stat-label">Total tarjeta mes</span>
+            <strong>{currency.format(totalCardDue)}</strong>
+          </div>
+        </div>
+        <div className="form-row">
+          <label htmlFor="monthly-installments">Cuotas del mes (manual, CLP)</label>
+          <input
+            id="monthly-installments"
+            type="number"
+            min="0"
+            step="100"
+            value={bankData.monthlyInstallmentsDue || ''}
+            onChange={handleMonthlyInstallmentsChange}
+            placeholder="0"
+          />
+        </div>
+      </section>
+
+      <section className="section-grid">
+        <div className="card">
+          <div className="card-header">
+            <h2>Cuenta corriente</h2>
+            <p className="muted">
+              Ultima importacion: {formatDateTime(bankData.lastAccountImportAt)}
+            </p>
+          </div>
+          <label className="file-input">
+            Importar Excel cuenta corriente
+            <input
+              type="file"
+              accept=".xlsx,.xls"
+              onChange={handleAccountImport}
+            />
+          </label>
+          {accountMovements.length === 0 ? (
+            <p className="muted">No hay movimientos importados.</p>
+          ) : (
+            <div className="table-scroll">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Fecha</th>
+                    <th>Detalle</th>
+                    <th>Cargo</th>
+                    <th>Abono</th>
+                    <th>Saldo</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {accountMovements.map((movement) => (
+                    <tr key={movement.id}>
+                      <td>{movement.date}</td>
+                      <td>{movement.detail}</td>
+                      <td>{currency.format(movement.debit)}</td>
+                      <td>{currency.format(movement.credit)}</td>
+                      <td>{currency.format(movement.balance)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        <div className="card">
+          <div className="card-header">
+            <h2>Tarjeta de credito</h2>
+            <p className="muted">
+              Ultima importacion: {formatDateTime(bankData.lastCardImportAt)}
+            </p>
+          </div>
+          <label className="file-input">
+            Importar Excel tarjeta credito
+            <input type="file" accept=".xlsx,.xls" onChange={handleCardImport} />
+          </label>
+          {cardMovements.length === 0 ? (
+            <p className="muted">No hay movimientos importados.</p>
+          ) : (
+            <div className="table-scroll">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Fecha</th>
+                    <th>Descripcion</th>
+                    <th>Ciudad</th>
+                    <th>Cuotas</th>
+                    <th>Monto</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {cardMovements.map((movement) => (
+                    <tr key={movement.id}>
+                      <td>{movement.date}</td>
+                      <td>{movement.description}</td>
+                      <td>{movement.city}</td>
+                      <td>{movement.installments}</td>
+                      <td>{currency.format(movement.amount)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </section>
 
       <section className="stats">
         <div className="stat">

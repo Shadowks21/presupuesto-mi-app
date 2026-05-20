@@ -38,6 +38,9 @@ Columnas esperadas:
 - Saldo
 - (Opcional) Docto. Nro., Trn, Caja, Sucursal
 
+El importador detecta automaticamente la fila de cabecera dentro de la cartola.
+El saldo usado en el resumen es **Saldo Disponible** del bloque superior.
+
 ### Tarjeta de credito (Excel)
 
 Columnas esperadas:

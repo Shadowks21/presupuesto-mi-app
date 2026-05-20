@@ -13,6 +13,7 @@ const getToday = () => new Date().toISOString().slice(0, 10)
 const BANK_DEFAULT = {
   accountMovements: [],
   cardMovements: [],
+  accountAvailableBalance: null,
   monthlyInstallmentsDue: 0,
   lastAccountImportAt: '',
   lastCardImportAt: '',
@@ -171,6 +172,9 @@ function App() {
   const cardMovements = bankData.cardMovements
 
   const accountBalance = useMemo(() => {
+    if (Number.isFinite(bankData.accountAvailableBalance)) {
+      return bankData.accountAvailableBalance
+    }
     if (accountMovements.length === 0) return 0
     const withDate = accountMovements.filter((item) => item.date)
     const sorted = [...(withDate.length ? withDate : accountMovements)].sort((a, b) =>
@@ -178,7 +182,7 @@ function App() {
     )
     const latest = sorted[sorted.length - 1]
     return Number(latest?.balance) || 0
-  }, [accountMovements])
+  }, [accountMovements, bankData.accountAvailableBalance])
 
   const cardUnbilledTotal = useMemo(
     () => cardMovements.reduce((sum, item) => sum + item.amount, 0),
@@ -191,21 +195,68 @@ function App() {
     setCanPersist(true)
   }
 
+  const ACCOUNT_HEADER_MAP = {
+    fecha: 'date',
+    descripcion: 'detail',
+    detalle: 'detail',
+    canalosucursal: 'channel',
+    cargosclp: 'debit',
+    cargos: 'debit',
+    abonosclp: 'credit',
+    abonos: 'credit',
+    saldoclp: 'balance',
+    saldo: 'balance',
+  }
+  const CARD_HEADER_MAP = {
+    fecha: 'date',
+    tipodetarjeta: 'cardType',
+    descripcion: 'description',
+    ciudad: 'city',
+    cuotas: 'installments',
+    monto: 'amount',
+  }
+
   const parseWorkbook = async (file) => {
     const data = await file.arrayBuffer()
     const workbook = XLSX.read(data, { type: 'array', cellDates: true })
     const sheetName = workbook.SheetNames[0]
     if (!sheetName) return []
     const sheet = workbook.Sheets[sheetName]
-    return XLSX.utils.sheet_to_json(sheet, { defval: '' })
+    return XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' })
   }
 
-  const getHeaderKeys = (rows) => {
-    if (rows.length === 0) return []
-    const headerRow = rows.reduce((best, row) =>
-      Object.keys(row).length > Object.keys(best).length ? row : best
+  const findHeaderRowIndex = (rows, requiredHeaders) =>
+    rows.findIndex((row) => {
+      const normalized = row.map((cell) => normalizeHeader(cell))
+      return requiredHeaders.every((header) => normalized.includes(header))
+    })
+
+  const buildColumnIndexMap = (headerRow, headerMap) => {
+    const map = {}
+    headerRow.forEach((cell, index) => {
+      const normalized = normalizeHeader(cell)
+      const targetKey = headerMap[normalized]
+      if (targetKey && map[targetKey] === undefined) {
+        map[targetKey] = index
+      }
+    })
+    return map
+  }
+
+  const findSaldoDisponible = (rows) => {
+    const labelIndex = rows.findIndex((row) =>
+      row.some((cell) => normalizeHeader(cell) === 'saldodisponible')
     )
-    return Object.keys(headerRow)
+    if (labelIndex === -1) return null
+    const labelRow = rows[labelIndex]
+    const valueRow = rows[labelIndex + 1]
+    if (!valueRow) return null
+    const columnIndex = labelRow.findIndex(
+      (cell) => normalizeHeader(cell) === 'saldodisponible'
+    )
+    if (columnIndex === -1) return null
+    const amount = parseAmount(valueRow[columnIndex])
+    return Number.isFinite(amount) ? amount : null
   }
 
   const handleAccountImport = async (event) => {
@@ -222,9 +273,22 @@ function App() {
       return
     }
 
-    const headers = getHeaderKeys(rows).map(normalizeHeader)
-    const required = ['fecha', 'detalle', 'saldo']
-    const missing = required.filter((key) => !headers.includes(key))
+    const headerIndex = findHeaderRowIndex(rows, [
+      'fecha',
+      'descripcion',
+      'cargosclp',
+      'abonosclp',
+      'saldoclp',
+    ])
+    if (headerIndex === -1) {
+      setError('No se encontro la fila de cabecera en la cartola.')
+      event.target.value = ''
+      return
+    }
+
+    const columnMap = buildColumnIndexMap(rows[headerIndex], ACCOUNT_HEADER_MAP)
+    const requiredFields = ['date', 'detail', 'balance']
+    const missing = requiredFields.filter((field) => columnMap[field] === undefined)
     if (missing.length > 0) {
       setError(
         `Faltan columnas esperadas en cuenta corriente: ${missing.join(', ')}.`
@@ -234,24 +298,16 @@ function App() {
     }
 
     const mapped = rows
+      .slice(headerIndex + 1)
       .map((row) => {
-        const normalized = {}
-        for (const [key, value] of Object.entries(row)) {
-          const normalizedKey = normalizeHeader(key)
-          if (normalizedKey) normalized[normalizedKey] = value
-        }
-
         return {
           id: crypto.randomUUID(),
-          date: formatDate(normalized.fecha),
-          detail: String(normalized.detalle ?? '').trim(),
-          debit: parseAmount(normalized.chequeocargo),
-          credit: parseAmount(normalized.depositooabono),
-          balance: parseAmount(normalized.saldo),
-          docNumber: String(normalized.doctonro ?? '').trim(),
-          trn: String(normalized.trn ?? '').trim(),
-          caja: String(normalized.caja ?? '').trim(),
-          sucursal: String(normalized.sucursal ?? '').trim(),
+          date: formatDate(row[columnMap.date]),
+          detail: String(row[columnMap.detail] ?? '').trim(),
+          debit: parseAmount(row[columnMap.debit]),
+          credit: parseAmount(row[columnMap.credit]),
+          balance: parseAmount(row[columnMap.balance]),
+          channel: String(row[columnMap.channel] ?? '').trim(),
         }
       })
       .filter(
@@ -263,9 +319,12 @@ function App() {
           item.balance
       )
 
+    const availableBalance = findSaldoDisponible(rows)
     updateBankData((prev) => ({
       ...prev,
       accountMovements: mapped,
+      accountAvailableBalance:
+        availableBalance !== null ? availableBalance : prev.accountAvailableBalance,
       lastAccountImportAt: new Date().toISOString(),
     }))
     event.target.value = ''
@@ -285,9 +344,16 @@ function App() {
       return
     }
 
-    const headers = getHeaderKeys(rows).map(normalizeHeader)
-    const required = ['fecha', 'descripcion', 'monto']
-    const missing = required.filter((key) => !headers.includes(key))
+    const headerIndex = findHeaderRowIndex(rows, ['fecha', 'descripcion', 'monto'])
+    if (headerIndex === -1) {
+      setError('No se encontro la fila de cabecera en el archivo de tarjeta.')
+      event.target.value = ''
+      return
+    }
+
+    const columnMap = buildColumnIndexMap(rows[headerIndex], CARD_HEADER_MAP)
+    const requiredFields = ['date', 'description', 'amount']
+    const missing = requiredFields.filter((field) => columnMap[field] === undefined)
     if (missing.length > 0) {
       setError(
         `Faltan columnas esperadas en tarjeta de credito: ${missing.join(', ')}.`
@@ -297,21 +363,16 @@ function App() {
     }
 
     const mapped = rows
+      .slice(headerIndex + 1)
       .map((row) => {
-        const normalized = {}
-        for (const [key, value] of Object.entries(row)) {
-          const normalizedKey = normalizeHeader(key)
-          if (normalizedKey) normalized[normalizedKey] = value
-        }
-
         return {
           id: crypto.randomUUID(),
-          date: formatDate(normalized.fecha),
-          cardType: String(normalized.tipodetarjeta ?? '').trim(),
-          description: String(normalized.descripcion ?? '').trim(),
-          city: String(normalized.ciudad ?? '').trim(),
-          installments: String(normalized.cuotas ?? '').trim(),
-          amount: parseAmount(normalized.monto),
+          date: formatDate(row[columnMap.date]),
+          cardType: String(row[columnMap.cardType] ?? '').trim(),
+          description: String(row[columnMap.description] ?? '').trim(),
+          city: String(row[columnMap.city] ?? '').trim(),
+          installments: String(row[columnMap.installments] ?? '').trim(),
+          amount: parseAmount(row[columnMap.amount]),
         }
       })
       .filter((item) => item.date || item.description || item.amount)

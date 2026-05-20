@@ -1,16 +1,44 @@
-# React + Vite
+# Presupuesto mensual (estatico)
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Aplicacion web estatica para registrar categorias, presupuestos mensuales y
+gastos manuales. Toda la informacion se guarda en el navegador (localStorage)
+y se puede exportar/importar como JSON.
 
-Currently, two official plugins are available:
+## Desarrollo local
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+```bash
+npm install
+npm run dev
+```
 
-## React Compiler
+## Build de produccion
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+```bash
+npm run build
+npm run preview
+```
 
-## Expanding the ESLint configuration
+## Respaldo de datos
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+- **Exportar JSON** descarga un archivo con categorias y gastos.
+- **Importar JSON** restaura los datos en otro navegador o equipo.
+
+## Despliegue gratis (costo neto 0)
+
+### Cloudflare Pages
+
+1. Conecta este repo a Cloudflare Pages.
+2. Configura:
+   - **Framework preset:** Vite
+   - **Build command:** `npm run build`
+   - **Output directory:** `dist`
+   - **Root directory:** `/`
+3. Despliega desde la rama `main`.
+
+### Limites para mantener costo 0
+
+- Usa subdominio gratuito (evita dominio propio con costo anual).
+- Sin backend ni base de datos externa: todo corre en el navegador.
+- El almacenamiento es local: si limpias el navegador o cambias de equipo,
+  necesitas el export/import.
+- Si agregas autenticacion, APIs, o bases de datos, podrias salir del free tier.
